@@ -1,28 +1,46 @@
 import React from 'react';
-import { Animated, StyleSheet } from 'react-native';
-import { TabBar } from 'react-native-tab-view';
-import TabBarIcon from './TabBarIcon';
+import {
+  Animated,
+  TouchableWithoutFeedback,
+  StyleSheet,
+  View,
+  Platform,
+  Keyboard,
+} from 'react-native';
+import SafeAreaView from 'react-native-safe-area-view';
 
-export default class TabBarTop extends React.PureComponent {
+import TabBarIcon from './TabBarIcon';
+import NavigationActions from '../../NavigationActions';
+import withOrientation from '../withOrientation';
+
+const majorVersion = parseInt(Platform.Version, 10);
+const isIos = Platform.OS === 'ios';
+const isIOS11 = majorVersion >= 11 && isIos;
+const defaultMaxTabBarItemWidth = 125;
+
+class TabBarTop extends React.PureComponent {
+  // See https://developer.apple.com/library/content/documentation/UserExperience/Conceptual/UIKitUICatalog/UITabBar.html
   static defaultProps = {
-    activeTintColor: '#fff',
-    inactiveTintColor: '#fff',
-    showIcon: false,
+    activeTintColor: '#3478f6', // Default active tint color in iOS 10
+    activeBackgroundColor: 'transparent',
+    inactiveTintColor: '#929292', // Default inactive tint color in iOS 10
+    inactiveBackgroundColor: 'transparent',
     showLabel: true,
-    upperCaseLabel: true,
+    showIcon: true,
     allowFontScaling: true,
+    adaptive: isIOS11,
   };
 
   _renderLabel = scene => {
     const {
       position,
-      tabBarPosition,
       navigation,
       activeTintColor,
       inactiveTintColor,
-      showLabel,
-      upperCaseLabel,
       labelStyle,
+      showLabel,
+      showIcon,
+      isLandscape,
       allowFontScaling,
     } = this.props;
     if (showLabel === false) {
@@ -42,15 +60,26 @@ export default class TabBarTop extends React.PureComponent {
 
     const tintColor = scene.focused ? activeTintColor : inactiveTintColor;
     const label = this.props.getLabel({ ...scene, tintColor });
+
     if (typeof label === 'string') {
       return (
         <Animated.Text
-          style={[styles.label, { color }, labelStyle]}
-          allowFontScaling={allowFontScaling}>
-          {upperCaseLabel ? label.toUpperCase() : label}
+          numberOfLines={1}
+          style={[
+            styles.label,
+            { color },
+            showIcon && this._shouldUseHorizontalTabs()
+              ? styles.labelBeside
+              : styles.labelBeneath,
+            labelStyle,
+          ]}
+          allowFontScaling={allowFontScaling}
+        >
+          {label}
         </Animated.Text>
       );
     }
+
     if (typeof label === 'function') {
       return label({ ...scene, tintColor });
     }
@@ -66,11 +95,14 @@ export default class TabBarTop extends React.PureComponent {
       inactiveTintColor,
       renderIcon,
       showIcon,
-      iconStyle,
+      showLabel,
     } = this.props;
     if (showIcon === false) {
       return null;
     }
+
+    const horizontal = this._shouldUseHorizontalTabs();
+
     return (
       <TabBarIcon
         position={position}
@@ -79,56 +111,237 @@ export default class TabBarTop extends React.PureComponent {
         inactiveTintColor={inactiveTintColor}
         renderIcon={renderIcon}
         scene={scene}
-        style={[styles.icon, iconStyle]}
+        style={[
+          styles.iconWithExplicitHeight,
+          showLabel === false && !horizontal && styles.iconWithoutLabel,
+          showLabel !== false && !horizontal && styles.iconWithLabel,
+        ]}
       />
     );
   };
 
-  _handleOnPress = scene => {
-    const { getOnPress, jumpToIndex, navigation } = this.props;
-    const previousScene = navigation.state.routes[navigation.state.index];
-    const onPress = getOnPress(previousScene, scene);
+  _renderTestIDProps = scene => {
+    const testIDProps =
+      this.props.getTestIDProps && this.props.getTestIDProps(scene);
+    return testIDProps;
+  };
 
-    if (onPress) {
-      // To maintain the same API as `TabbarBottom`, we pass in a `defaultHandler`
-      // even though I don't believe in this case it should be any different
-      // than `jumpToIndex`.
-      onPress({
-        previousScene,
-        scene,
-        jumpToIndex,
-        defaultHandler: jumpToIndex,
-      });
+  _tabItemMaxWidth() {
+    const { tabStyle, layout } = this.props;
+    let maxTabBarItemWidth;
+
+    const flattenedTabStyle = StyleSheet.flatten(tabStyle);
+
+    if (flattenedTabStyle) {
+      if (typeof flattenedTabStyle.width === 'number') {
+        maxTabBarItemWidth = flattenedTabStyle.width;
+      } else if (
+        typeof flattenedTabStyle.width === 'string' &&
+        flattenedTabStyle.endsWith('%')
+      ) {
+        const width = parseFloat(flattenedTabStyle.width);
+        if (Number.isFinite(width)) {
+          maxTabBarItemWidth = layout.width * (width / 100);
+        }
+      } else if (typeof flattenedTabStyle.maxWidth === 'number') {
+        maxTabBarItemWidth = flattenedTabStyle.maxWidth;
+      } else if (
+        typeof flattenedTabStyle.maxWidth === 'string' &&
+        flattenedTabStyle.endsWith('%')
+      ) {
+        const width = parseFloat(flattenedTabStyle.maxWidth);
+        if (Number.isFinite(width)) {
+          maxTabBarItemWidth = layout.width * (width / 100);
+        }
+      }
+    }
+
+    if (!maxTabBarItemWidth) {
+      maxTabBarItemWidth = defaultMaxTabBarItemWidth;
+    }
+
+    return maxTabBarItemWidth;
+  }
+
+  _shouldUseHorizontalTabs() {
+    const { routes } = this.props.navigation.state;
+    const { isLandscape, layout, adaptive, tabStyle } = this.props;
+
+    if (!adaptive) {
+      return false;
+    }
+
+    let tabBarWidth = layout.width;
+    if (tabBarWidth === 0) {
+      return Platform.isPad;
+    }
+
+    if (!Platform.isPad) {
+      return isLandscape;
     } else {
-      jumpToIndex(scene.index);
+      const maxTabBarItemWidth = this._tabItemMaxWidth();
+      return routes.length * maxTabBarItemWidth <= tabBarWidth;
+    }
+  }
+
+  _handleTabPress = index => {
+    const { jumpToIndex, navigation } = this.props;
+    const currentIndex = navigation.state.index;
+
+    if (currentIndex === index) {
+      let childRoute = navigation.state.routes[index];
+      if (childRoute.hasOwnProperty('index') && childRoute.index > 0) {
+        navigation.dispatch(
+          NavigationActions.popToTop({ key: childRoute.key })
+        );
+      } else {
+        // TODO: do something to scroll to top
+      }
+    } else {
+      jumpToIndex(index);
     }
   };
 
   render() {
-    // TODO: Define full proptypes
-    const props = this.props;
+    const {
+      position,
+      navigation,
+      jumpToIndex,
+      getOnPress,
+      getTestIDProps,
+      activeBackgroundColor,
+      inactiveBackgroundColor,
+      style,
+      animateStyle,
+      tabStyle,
+      isLandscape,
+    } = this.props;
+    const { routes } = navigation.state;
+    const previousScene = routes[navigation.state.index];
+    // Prepend '-1', so there are always at least 2 items in inputRange
+    const inputRange = [-1, ...routes.map((x, i) => i)];
+
+    const tabBarStyle = [
+      styles.tabBar,
+      this._shouldUseHorizontalTabs() && !Platform.isPad
+        ? styles.tabBarCompact
+        : styles.tabBarRegular,
+      style,
+    ];
 
     return (
-      <TabBar
-        {...props}
-        onTabPress={this._handleOnPress}
-        jumpToIndex={() => {}}
-        renderIcon={this._renderIcon}
-        renderLabel={this._renderLabel}
-      />
+      <Animated.View style={animateStyle}>
+        <SafeAreaView
+          style={tabBarStyle}
+          forceInset={{ bottom: 'never', top: 'never' }}
+        >
+          {routes.map((route, index) => {
+            const focused = index === navigation.state.index;
+            const scene = { route, index, focused };
+            const onPress = getOnPress(previousScene, scene);
+            const outputRange = inputRange.map(
+              inputIndex =>
+                inputIndex === index
+                  ? activeBackgroundColor
+                  : inactiveBackgroundColor
+            );
+            const backgroundColor = position.interpolate({
+              inputRange,
+              outputRange: outputRange,
+            });
+
+            const justifyContent = this.props.showIcon ? 'flex-end' : 'center';
+            const extraProps = this._renderTestIDProps(scene) || {};
+            const { testID, accessibilityLabel } = extraProps;
+
+            return (
+              <TouchableWithoutFeedback
+                key={route.key}
+                testID={testID}
+                accessibilityLabel={accessibilityLabel}
+                onPress={() =>
+                  onPress
+                    ? onPress({
+                        previousScene,
+                        scene,
+                        jumpToIndex,
+                        defaultHandler: this._handleTabPress,
+                      })
+                    : this._handleTabPress(index)
+                }
+              >
+                <Animated.View style={[styles.tab, { backgroundColor }]}>
+                  <View
+                    style={[
+                      styles.tab,
+                      this._shouldUseHorizontalTabs()
+                        ? styles.tabLandscape
+                        : styles.tabPortrait,
+                      tabStyle,
+                    ]}
+                  >
+                    {this._renderIcon(scene)}
+                    {this._renderLabel(scene)}
+                  </View>
+                </Animated.View>
+              </TouchableWithoutFeedback>
+            );
+          })}
+        </SafeAreaView>
+      </Animated.View>
     );
   }
 }
 
+const DEFAULT_HEIGHT = 49;
+const COMPACT_HEIGHT = 29;
+
 const styles = StyleSheet.create({
-  icon: {
-    height: 24,
-    width: 24,
+  tabBar: {
+    backgroundColor: '#F7F7F7', // Default background color in iOS 10
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(0, 0, 0, .3)',
+    flexDirection: 'row',
+  },
+  tabBarCompact: {
+    height: COMPACT_HEIGHT,
+  },
+  tabBarRegular: {
+    height: DEFAULT_HEIGHT,
+  },
+  tab: {
+    flex: 1,
+    alignItems: isIos ? 'center' : 'stretch',
+  },
+  tabPortrait: {
+    justifyContent: 'flex-end',
+    flexDirection: 'column',
+  },
+  tabLandscape: {
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
+  iconWithoutLabel: {
+    flex: 1,
+  },
+  iconWithLabel: {
+    flexGrow: 1,
+  },
+  iconWithExplicitHeight: {
+    height: Platform.isPad ? DEFAULT_HEIGHT : COMPACT_HEIGHT,
   },
   label: {
     textAlign: 'center',
-    fontSize: 13,
-    margin: 8,
     backgroundColor: 'transparent',
   },
+  labelBeneath: {
+    fontSize: 10,
+    marginBottom: 1.5,
+  },
+  labelBeside: {
+    fontSize: 13,
+    marginLeft: 20,
+  },
 });
+
+export default withOrientation(TabBarTop);
